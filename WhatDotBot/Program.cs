@@ -1,22 +1,50 @@
 ﻿namespace WhatDotBot
 {
     using System;
+    using System.Collections.Generic;
+    using System.Diagnostics;
     using System.IO;
     using System.Linq;
     using System.Net.NetworkInformation;
+    using System.Threading;
     using System.Threading.Tasks;
+    using System.Xml.Serialization;
     using Telegram.Bot;
     using Telegram.Bot.Args;
+    using Telegram.Bot.Types;
     using Telegram.Bot.Types.Enums;
     using Telegram.Bot.Types.InlineQueryResults;
     using Telegram.Bot.Types.ReplyMarkups;
+    using WhatDotBot.Models;
 
     public static class Program
     {
+        private static readonly log4net.ILog _log = log4net.LogManager.GetLogger(typeof(Program));
         private static readonly TelegramBotClient Bot = new TelegramBotClient(Environment.GetEnvironmentVariable("TelegramApiKey"));
+        private const string filePath = "/home/pi/tmp/whatdotbot/users.xml";
+        private static readonly XmlSerializer serializer = new XmlSerializer(typeof(HashSet<Subscriber>));
+        private static readonly HashSet<Subscriber> subscribers = new HashSet<Subscriber>();
 
         public static void Main(string[] args)
         {
+            if (System.IO.File.Exists(filePath))
+            {
+                HashSet<Subscriber> subs;
+                using (var reader = System.IO.File.OpenRead(filePath))
+                {
+                    subs = serializer.Deserialize(reader) as HashSet<Subscriber> ?? new HashSet<Subscriber>();
+                }
+
+                if (subs.Count != 0)
+                {
+                    foreach (var sub in subs)
+                    {
+                        if (sub.ChatId == 0) continue;
+                        subscribers.Add(sub);
+                    }
+                }
+            }
+
             var me = Bot.GetMeAsync().Result;
             Console.Title = me.Username;
 
@@ -28,8 +56,15 @@
             Bot.OnReceiveError += BotOnReceiveError;
 
             Bot.StartReceiving(Array.Empty<UpdateType>());
-            Console.WriteLine($"Start listening for @{me.Username}");
-            Console.ReadLine();
+
+            if (subscribers.Count != 0)
+            {
+                foreach (var sub in subscribers)
+                    IpCommand(new Message() { Chat = new Chat() { Id = sub.ChatId } }).ConfigureAwait(false);
+            }
+
+            _log.Info($"Start listening for @{me.Username}");
+            Thread.Sleep(Timeout.Infinite);
             Bot.StopReceiving();
         }
 
@@ -48,12 +83,12 @@
 
         private static void BotOnChosenInlineResultReceived(object sender, ChosenInlineResultEventArgs chosenInlineResultEventArgs)
         {
-            Console.WriteLine($"Received inline result: {chosenInlineResultEventArgs.ChosenInlineResult.ResultId}");
+            _log.Info($"Received inline result: {chosenInlineResultEventArgs.ChosenInlineResult.ResultId}");
         }
 
         private static async void BotOnInlineQueryReceived(object sender, InlineQueryEventArgs inlineQueryEventArgs)
         {
-            Console.WriteLine($"Received inline query from: {inlineQueryEventArgs.InlineQuery.From.Id}");
+            _log.Info($"Received inline query from: {inlineQueryEventArgs.InlineQuery.From.Id}");
 
             InlineQueryResultBase[] results = {
                 new InlineQueryResultLocation(
@@ -92,54 +127,57 @@
 
             if (message == null || message.Type != MessageType.Text) return;
 
-            switch (message.Text.Split(' ').First())
+            try
             {
-                // send inline keyboard
-                case "/inline":
-                    await InlineCommand(message).ConfigureAwait(false); break;
-
-                // send custom keyboard
-                case "/keyboard":
-                    await KeyboardCommand(message).ConfigureAwait(false); break;
-
-                // send a photo
-                case "/photo":
-                    await SendPhotoCommand(message).ConfigureAwait(false); break;
-
-                // request location or contact
-                case "/request":
-                    await RequestCommand(message).ConfigureAwait(false); break;
-
-                case "/ip":
-                    await IpCommand(message).ConfigureAwait(false); break;
-
-                default:
-                    await ListCommands(message).ConfigureAwait(false); break;
+                switch (message.Text.Split(' ').First())
+                {
+                    case "/inline": await InlineCommand(message).ConfigureAwait(false); break;
+                    case "/ip": await IpCommand(message).ConfigureAwait(false); break;
+                    case "/keyboard": await KeyboardCommand(message).ConfigureAwait(false); break;
+                    case "/photo": await SendPhotoCommand(message).ConfigureAwait(false); break;
+                    case "/request": await RequestCommand(message).ConfigureAwait(false); break;
+                    case "/temp": await TemperatureCommand(message).ConfigureAwait(false); break;
+                    case "/subscribe": await SubscribeCommand(message).ConfigureAwait(false); break;
+                    default: await ListCommands(message).ConfigureAwait(false); break;
+                }
+            }
+            catch (Exception e)
+            {
+                _log.Error("ERROR:", e);
             }
         }
 
-        private static async Task SendPhotoCommand(Telegram.Bot.Types.Message message)
+        private static async Task SubscribeCommand(Message message)
         {
-            const string file = "Files/tux.png";
-            await Bot.SendChatActionAsync(message.Chat.Id, ChatAction.UploadPhoto).ConfigureAwait(false);
+            var id = message.Chat.Id;
 
-            using (var fileStream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read))
+            if (subscribers.Select(s => s.ChatId).Contains(id))
             {
-                await Bot.SendPhotoAsync(
-                    message.Chat.Id,
-                    fileStream,
-                    "Nice Picture").ConfigureAwait(false);
+                await Bot.SendTextMessageAsync(message.Chat.Id, "Already subscribed").ConfigureAwait(false);
+                return;
             }
+
+            subscribers.Add(new Subscriber()
+            {
+                ChatId = message.Chat.Id,
+                Name = $"{message.Chat.FirstName} {message.Chat.LastName}",
+                Sub = Subscription.All
+            });
+
+            using (var writer = System.IO.File.CreateText(filePath))
+                serializer.Serialize(writer, subscribers);
+
+            await Bot.SendTextMessageAsync(message.Chat.Id, $"{message.Chat.Id} Subscribed").ConfigureAwait(false);
         }
 
         private static void BotOnReceiveError(object sender, ReceiveErrorEventArgs receiveErrorEventArgs)
         {
-            Console.WriteLine("Received error: {0} — {1}",
+            _log.InfoFormat("Received error: {0} — {1}",
                 receiveErrorEventArgs.ApiRequestException.ErrorCode,
                 receiveErrorEventArgs.ApiRequestException.Message);
         }
 
-        private static async Task InlineCommand(Telegram.Bot.Types.Message message)
+        private static async Task InlineCommand(Message message)
         {
             await Bot.SendChatActionAsync(message.Chat.Id, ChatAction.Typing).ConfigureAwait(false);
 
@@ -165,7 +203,7 @@
                 replyMarkup: inlineKeyboard).ConfigureAwait(false);
         }
 
-        private static async Task IpCommand(Telegram.Bot.Types.Message message)
+        private static async Task IpCommand(Message message)
         {
             await Bot
                 .SendTextMessageAsync(
@@ -178,7 +216,7 @@
                 ).ConfigureAwait(false);
         }
 
-        private static async Task KeyboardCommand(Telegram.Bot.Types.Message message)
+        private static async Task KeyboardCommand(Message message)
         {
             ReplyKeyboardMarkup ReplyKeyboard = new[]
             {
@@ -192,7 +230,7 @@
                 replyMarkup: ReplyKeyboard).ConfigureAwait(false);
         }
 
-        private static async Task ListCommands(Telegram.Bot.Types.Message message)
+        private static async Task ListCommands(Message message)
         {
             const string usage = @"
 Usage:
@@ -200,7 +238,8 @@ Usage:
 /keyboard - send custom keyboard
 /photo    - send a photo
 /request  - request location or contact
-/ip       - list ip addresses";
+/ip       - list ip addresses
+/temp     - current temperature";
 
             await Bot.SendTextMessageAsync(
                 message.Chat.Id,
@@ -208,7 +247,7 @@ Usage:
                 replyMarkup: new ReplyKeyboardRemove()).ConfigureAwait(false);
         }
 
-        private static async Task RequestCommand(Telegram.Bot.Types.Message message)
+        private static async Task RequestCommand(Message message)
         {
             var RequestReplyKeyboard = new ReplyKeyboardMarkup(new[]
             {
@@ -220,6 +259,40 @@ Usage:
                 message.Chat.Id,
                 "Who or Where are you?",
                 replyMarkup: RequestReplyKeyboard).ConfigureAwait(false);
+        }
+
+        private static async Task SendPhotoCommand(Message message)
+        {
+            const string file = "Files/tux.png";
+            if (!System.IO.File.Exists(file)) return;
+            await Bot.SendChatActionAsync(message.Chat.Id, ChatAction.UploadPhoto).ConfigureAwait(false);
+
+            using (var fileStream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                await Bot.SendPhotoAsync(
+                    message.Chat.Id,
+                    fileStream,
+                    "Nice Picture").ConfigureAwait(false);
+            }
+        }
+
+        private static async Task TemperatureCommand(Message message)
+        {
+            ProcessStartInfo procStartInfo = new ProcessStartInfo("vcgencmd", "measure_temp")
+            {
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            string result;
+            using (Process proc = new Process { StartInfo = procStartInfo })
+            {
+                proc.Start();
+                result = proc.StandardOutput.ReadToEnd();
+            }
+
+            await Bot.SendTextMessageAsync(message.Chat.Id, result).ConfigureAwait(false);
         }
     }
 }
