@@ -6,6 +6,7 @@
     using System.IO;
     using System.Linq;
     using System.Net.NetworkInformation;
+    using System.Reflection;
     using System.Threading;
     using System.Threading.Tasks;
     using System.Xml.Serialization;
@@ -20,15 +21,19 @@
     public static class Program
     {
         private static readonly log4net.ILog _log = log4net.LogManager.GetLogger(typeof(Program));
+        private static readonly string assemblyFolder = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
         private static readonly TelegramBotClient Bot = new TelegramBotClient(Environment.GetEnvironmentVariable("TelegramApiKey"));
-        private const string filePath = "/home/pi/tmp/whatdotbot/users.xml";
+        private static readonly string filePath = $"{assemblyFolder}/users.xml";
         private static readonly XmlSerializer serializer = new XmlSerializer(typeof(HashSet<Subscriber>));
         private static readonly HashSet<Subscriber> subscribers = new HashSet<Subscriber>();
 
         public static void Main(string[] args)
         {
+            log4net.Config.XmlConfigurator.Configure(_log.Logger.Repository, new FileInfo($"{assemblyFolder}/log4net.xml"));
+            _log.Info(string.Format("{0} start {0}", new string('*', 10)));
             if (System.IO.File.Exists(filePath))
             {
+                _log.Info($"Loading {filePath}");
                 HashSet<Subscriber> subs;
                 using (var reader = System.IO.File.OpenRead(filePath))
                 {
@@ -43,6 +48,7 @@
                         subscribers.Add(sub);
                     }
                 }
+                _log.Info($"Loaded {subscribers.Count}");
             }
 
             var me = Bot.GetMeAsync().Result;
@@ -65,7 +71,6 @@
 
             _log.Info($"Start listening for @{me.Username}");
             Thread.Sleep(Timeout.Infinite);
-            Bot.StopReceiving();
         }
 
         private static async void BotOnCallbackQueryReceived(object sender, CallbackQueryEventArgs callbackQueryEventArgs)
@@ -76,7 +81,7 @@
                 callbackQuery.Id,
                 $"Received {callbackQuery.Data}").ConfigureAwait(false);
 
-            await Bot.SendTextMessageAsync(
+            await Post(
                 callbackQuery.Message.Chat.Id,
                 $"Received {callbackQuery.Data}").ConfigureAwait(false);
         }
@@ -129,6 +134,7 @@
 
             try
             {
+                _log.Info($"{message.Chat.Id}: {message.Text}");
                 switch (message.Text.Split(' ').First())
                 {
                     case "/inline": await InlineCommand(message).ConfigureAwait(false); break;
@@ -145,29 +151,6 @@
             {
                 _log.Error("ERROR:", e);
             }
-        }
-
-        private static async Task SubscribeCommand(Message message)
-        {
-            var id = message.Chat.Id;
-
-            if (subscribers.Select(s => s.ChatId).Contains(id))
-            {
-                await Bot.SendTextMessageAsync(message.Chat.Id, "Already subscribed").ConfigureAwait(false);
-                return;
-            }
-
-            subscribers.Add(new Subscriber()
-            {
-                ChatId = message.Chat.Id,
-                Name = $"{message.Chat.FirstName} {message.Chat.LastName}",
-                Sub = Subscription.All
-            });
-
-            using (var writer = System.IO.File.CreateText(filePath))
-                serializer.Serialize(writer, subscribers);
-
-            await Bot.SendTextMessageAsync(message.Chat.Id, $"{message.Chat.Id} Subscribed").ConfigureAwait(false);
         }
 
         private static void BotOnReceiveError(object sender, ReceiveErrorEventArgs receiveErrorEventArgs)
@@ -205,15 +188,14 @@
 
         private static async Task IpCommand(Message message)
         {
-            await Bot
-                .SendTextMessageAsync(
-                message.Chat.Id,
-                string.Join(Environment.NewLine, NetworkInterface
-                    .GetAllNetworkInterfaces()
-                    .SelectMany(m => m.GetIPProperties().UnicastAddresses)
-                    .Select(s => s.Address.ToString())
-                    .OrderBy(b => b))
-                ).ConfigureAwait(false);
+            await Post(message.Chat.Id,
+                string.Join(
+                    Environment.NewLine,
+                    NetworkInterface
+                        .GetAllNetworkInterfaces()
+                        .SelectMany(m => m.GetIPProperties().UnicastAddresses)
+                        .Select(s => s.Address.ToString())
+                        .OrderBy(b => b))).ConfigureAwait(false);
         }
 
         private static async Task KeyboardCommand(Message message)
@@ -247,6 +229,17 @@ Usage:
                 replyMarkup: new ReplyKeyboardRemove()).ConfigureAwait(false);
         }
 
+        private static async Task Post(Message message, string msg)
+        {
+            await Post(message.Chat.Id, msg).ConfigureAwait(false);
+        }
+
+        private static async Task Post(long id, string msg)
+        {
+            _log.Info($"{id}: {msg}");
+            await Bot.SendTextMessageAsync(id, msg).ConfigureAwait(false);
+        }
+
         private static async Task RequestCommand(Message message)
         {
             var RequestReplyKeyboard = new ReplyKeyboardMarkup(new[]
@@ -276,6 +269,29 @@ Usage:
             }
         }
 
+        private static async Task SubscribeCommand(Message message)
+        {
+            var id = message.Chat.Id;
+
+            if (subscribers.Select(s => s.ChatId).Contains(id))
+            {
+                await Post(message, "Already subscribed").ConfigureAwait(false);
+                return;
+            }
+
+            subscribers.Add(new Subscriber()
+            {
+                ChatId = message.Chat.Id,
+                Name = $"{message.Chat.FirstName} {message.Chat.LastName}",
+                Sub = Subscription.All
+            });
+
+            using (var writer = System.IO.File.CreateText(filePath))
+                serializer.Serialize(writer, subscribers);
+
+            await Post(message.Chat.Id, $"{message.Chat.Id} Subscribed").ConfigureAwait(false);
+        }
+
         private static async Task TemperatureCommand(Message message)
         {
             ProcessStartInfo procStartInfo = new ProcessStartInfo("vcgencmd", "measure_temp")
@@ -292,7 +308,7 @@ Usage:
                 result = proc.StandardOutput.ReadToEnd();
             }
 
-            await Bot.SendTextMessageAsync(message.Chat.Id, result).ConfigureAwait(false);
+            await Post(message.Chat.Id, result).ConfigureAwait(false);
         }
     }
 }
