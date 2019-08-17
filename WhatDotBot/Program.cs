@@ -134,7 +134,7 @@
 
             try
             {
-                _log.Info($"{message.Chat.Id}: {message.Text}");
+                _log.Info($"<-{message.Chat.Id}: {message.Text}");
                 switch (message.Text.Split(' ').First())
                 {
                     case "/inline": await InlineCommand(message).ConfigureAwait(false); break;
@@ -236,7 +236,7 @@ Usage:
 
         private static async Task Post(long id, string msg)
         {
-            _log.Info($"{id}: {msg}");
+            _log.Info($"->{id}: {msg.Replace(Environment.NewLine, " \\n ")}");
             await Bot.SendTextMessageAsync(id, msg).ConfigureAwait(false);
         }
 
